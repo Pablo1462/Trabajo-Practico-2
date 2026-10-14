@@ -1,0 +1,156 @@
+---
+title: "Biopsy"
+format: html
+---
+
+1.  Realice un análisis descriptivo exploratorio del conjunto de datos.
+
+    ```{r}
+    library(tidyverse)
+    # Cargar el archivo .RData
+    load("datos.RData")
+
+    library(skimr)
+    skim (biopsy)
+    ```
+
+2.  Descarte la variable ID, renombre las variables V1–V9 con nombres descriptivos
+
+```{r}
+library(dplyr)
+
+biopsy <- biopsy %>%
+  
+  select(-ID) %>%
+  # renombrar las variables
+  rename(
+    clump_thickness             = V1,
+    uniformity_cell_size        = V2,
+    uniformity_cell_shape       = V3,
+    marginal_adhesion           = V4,
+    single_epithelial_cell_size = V5,
+    bare_nuclei                 = V6,
+    bland_chromatin             = V7,
+    normal_nucleoli             = V8,
+    mitoses                     = V9
+  )
+```
+
+3 ¿Detectó valores faltantes (NAs)? Explique qué consecuencias tendría omitirlos e implemente un método de imputación para evitar la pérdida de observaciones.
+
+RTA: **Pérdida de observaciones**: si se eliminan las filas con NAs, se reduce el tamaño de la muestra.
+
+**Menor potencia estadística**: menos datos implican menor capacidad de detectar patrones.
+
+**Sesgo potencial**: si los faltantes no son aleatorios, eliminar filas puede distorsionar los resultados.
+
+**Errores en modelos**: muchos algoritmos no aceptan NAs y directamente fallan si no se imputan.
+
+No conviene reemplazar por cero, porque ese valor no tiene sentido biológico.
+
+Voy utilizar KNN (K-NEAREST NEIGHBORS) vecinos cercanos. Busca los k registros más parecidos basándose en una función de distancia y promedia sus valores para hacer la imputación
+
+```{r}
+library(VIM)  
+# Imputar solo la variable bare_nuclei
+biopsy <- kNN(biopsy, variable = "bare_nuclei", k = 5)
+
+# Verificar
+sum(is.na(biopsy$Bare_Nuclei))
+```
+
+4.  Divida el conjunto de datos en 75% para entrenamiento y 25% para prueba.
+
+    ```{r}
+    library(tidymodels)
+    set.seed(123)
+    biopsy_split <- initial_split(biopsy, 
+                                  prop = 0.75, 
+                                  strata = class
+    )
+    biopsy_train <- training(biopsy_split)
+    biopsy_test  <- testing(biopsy_split)
+    ```
+
+5.  ¿Por qué resulta necesario aplicar una estratificación sobre la variable respuesta al realizar esta partición? Justifique.
+
+    RTA: La estratificación garantiza que la **proporción de clases** en el conjunto de entrenamiento y en el de prueba sea similar a la del dataset original. Es necesario preservar la distribución de las clases en ambos subconjuntos para que el modelo aprenda y se evalúe de manera representativa
+
+6.  Ajuste un modelo de Regresión Logística empleando el conjunto de entrenamiento.
+
+```{r}
+logistic_spec <- logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")
+
+biopsy_recipe <- recipe(class ~ ., data = biopsy_train) %>%
+  step_rm(bare_nuclei_imp) %>%
+  step_naomit(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+biopsy_workflow <- workflow() %>%
+  add_recipe(biopsy_recipe) %>%
+  add_model(logistic_spec)
+```
+
+7 Calcule e interprete los Odds Ratios (eβ) de los predictores significativos
+
+```{r}
+biopsy_fit <- fit(biopsy_workflow, data = biopsy_train)
+glm_fit <- extract_fit_engine(biopsy_fit)
+odds_ratios <- exp(coef(glm_fit))
+```
+
+¿Qué variable incrementa en mayor medida la probabilidad de que un tumor sea maligno?
+
+```{r}
+odds_ratios %>%
+  enframe(name = "predictor", value = "odds_ratio") %>%
+  filter(predictor != "(Intercept)") %>%
+  arrange(desc(odds_ratio))
+```
+
+8 Genere la Matriz de Confusión sobre el conjunto de prueba.
+
+```{r}
+library(yardstick)
+predicciones <- predict(biopsy_fit, biopsy_test, type = "class") %>%
+  bind_cols(predict(biopsy_fit, biopsy_test, type = "prob")) %>%
+  bind_cols(biopsy_test %>% select(class))
+conf_mat(predicciones, truth = class, estimate = .pred_class)
+```
+
+9.  Calcule e interprete la Exactitud (Accuracy), la Sensibilidad (Recall) y la Especificidad (Specificity)
+
+```{r}
+library(yardstick)
+
+metrics(predicciones, truth = class, estimate = .pred_class)
+
+
+```
+
+**Accuracy 0.972** + **Kappa 0.937** = el modelo acierta 9 de cada 10 casos
+
+```{r}
+sens(predicciones, truth = class, estimate = .pred_class, event_level = "second")
+```
+
+El modelo detecta correctamente 93 de 100 casos malignos. Si bien es un porcentaje alto, conviene NO dejar pasar esos 7 de 10
+
+```{r}
+spec(predicciones, truth = class, estimate = .pred_class, event_level = "second")
+```
+
+El modelo detecta 99 de 100 casos benignos.
+
+10 Grafique la Curva ROC y reporte el área bajo la curva (ROC-AUC)
+
+```{r}
+roc_data <- roc_curve(predicciones, truth = class, .pred_malignant, event_level = "second")
+autoplot(roc_data)
+```
+
+11 En el contexto del diagnóstico, ¿Qué métrica de evaluación debería priorizar el equipo médico para minimizar riesgos?
+
+RTA: el equipo mèdico debe priorizar la sensibilidad para minimizar los casos malignos clasificados como benignos

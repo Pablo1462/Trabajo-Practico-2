@@ -1,0 +1,150 @@
+---
+title: "workflow diamantes"
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+```{r}
+library(tidymodels)
+tidymodels_prefer() 
+```
+
+```{r}
+library(skimr)
+
+# Cargar la librería
+library(ggplot2)
+
+# Acceder al dataset
+data("diamonds")
+
+# Ver las primeras filas
+head(diamonds)
+
+```
+
+```{r}
+datos <- diamonds |> 
+  mutate(across(where(is.character), as.factor))
+skim(datos)
+```
+
+```{r}
+datos_transf <- datos |> mutate(price10 = log10(price))
+datos_split <- initial_split(datos_transf, 
+                                 prop = 0.8, 
+                                 strata = price
+)
+datos_train <- training(datos_split)
+datos_test  <- testing(datos_split)
+```
+
+```{r}
+datos_reci <- recipe(price10 ~ carat + cut +  color + clarity, data = datos_train)   |> 
+  step_log(carat, base = 10) |> 
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) 
+tidy(datos_reci)
+```
+
+```{r}
+lm_model <- linear_reg() |>
+  set_engine("lm")
+```
+
+```{r}
+lm_wflow <- 
+  workflow() |>
+  add_model(lm_model) |>
+  add_recipe(datos_reci)
+```
+
+```{r}
+# Para preparar la receta y ver los datos transformados:
+datos_prep <- prep(datos_reci)
+datos_procesados <- bake(datos_prep, new_data = NULL)
+
+# Para inspeccionar los pasos aplicados:
+tidy(datos_prep)
+```
+
+```{r}
+lm_fit <- fit(lm_wflow, datos_train)
+estimated_recipe <- 
+  lm_fit |>
+  extract_recipe(estimated = TRUE)
+```
+
+```{r}
+datos_test_res <- predict(lm_fit, new_data = datos_test)
+datos_test_res
+```
+
+```{r}
+datos_test_res_fin <- bind_cols(datos_test_res, 
+                                   datos_test |> 
+                                     select(price10)
+)
+datos_test_res_fin      
+```
+
+```{r}
+datos_test_res_fin |> ggplot(aes(x = price10, y = .pred)) + 
+  # Create a diagonal line:
+  geom_abline(lty = 2) + 
+  geom_point(alpha = 0.4) + 
+  labs(y = "Precio predicho(log10)", x = " Precio (log10)") +
+  # Scale and size the x- and y-axis uniformly:
+  coord_obs_pred()
+```
+
+```{r}
+datos_metrics <- metric_set(rmse, rsq, mae)
+datos_metrics(datos_test_res_fin,
+                  truth = price10, 
+                  estimate = .pred)
+```
+
+```{r}
+# 1. Calcular el error al cuadrado por cada fila
+datos_test_res_fin |>  mutate(    error_cuadrado = (price10 - .pred)^2  ) |>  ggplot(aes(x = price10, y = error_cuadrado)) +  geom_point(alpha = 0.3, color = "midnightblue") +  geom_hline(
+  yintercept = mean((datos_test_res_fin$price10 - datos_test_res_fin$.pred)^2),     color = "firebrick", lty = 2, size = 1  ) +  labs(    title = "Distribución de Errores Cuadráticos Individuales",    subtitle = "La línea roja es el MSE (la raíz de esta línea es el RMSE final)",    x = "Precio(log10)",
+                                                                                                                                                y = "Error Cuadrático (y - ŷ)²"
+  ) +  theme_minimal()+
+coord_cartesian(ylim = c(-0.1, 1))
+```
+
+```{r}
+datos_metrics_real <- metric_set(rmse, mae)
+datos_test_res_real <- datos_test_res_fin |> 
+  mutate(
+    precio_real = 10^(price10),
+    pred_real  = 10^(.pred)
+  ) 
+datos_metrics_real(datos_test_res_real, 
+                       truth =  precio_real, 
+                       estimate = pred_real )
+```
+
+```{r}
+# Agregar MAPE a las métricas
+datos_metrics_extra <- metric_set(rmse, mae, mape)
+
+# Calcular sobre la escala original
+datos_test_res_real <- datos_test_res_fin |>
+  mutate(
+    precio_real = 10^(price10),
+    pred_real   = 10^(.pred)
+  )
+
+datos_metrics_extra(
+  datos_test_res_real,
+  truth    = precio_real,
+  estimate = pred_real
+)
+```
+
+\
+\

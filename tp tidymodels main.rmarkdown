@@ -1,0 +1,290 @@
+---
+title: "TP workflow diamantes"
+---
+
+## 
+
+```{r}
+library(tidymodels)
+tidymodels_prefer() 
+```
+
+## Ejercicio 1
+
+1.  Cargue el dataset diamonds
+
+```{r}
+library(skimr)
+
+# Cargar la librería
+library(ggplot2)
+
+# Acceder al dataset
+data("diamonds")
+
+# Ver las primeras filas
+head(diamonds)
+
+```
+
+TP. ¿Cuántas variables numéricas y categóricas presenta el dataset?
+
+```{r}
+datos <- diamonds |> 
+  mutate(across(where(is.character), as.factor))
+skim(datos)
+```
+
+RTA: Hay 7 numéricas y 3 categóricas
+
+TP ¿Existen valores faltantes (NA)?
+
+```{r}
+anyNA(datos)
+sum(is.na(datos))
+
+```
+
+RTA: no hay valores faltantes
+
+TP Analice brevemente la asimetría y dispersión de la variable respuesta price
+
+```{r}
+summary(datos$price)
+```
+
+**Dispersión alta** → la desviación estándar es del mismo orden que la media, lo que indica gran heterogeneidad en los precios
+
+```{r}
+# Asimetría
+library(e1071)
+skewness(datos$price, na.rm = TRUE)
+
+```
+
+```{r}
+hist(datos$price, breaks = 50,
+     main = "Distribución de Price",
+     xlab = "Price", col = "lightblue")
+
+```
+
+```{r}
+boxplot(datos$price,
+        main = "Boxplot de Price",
+        ylab = "Price", col = "lightgreen")
+
+```
+
+**Asimetría positiva moderada-fuerte** → predominan precios bajos/medios, con unos pocos diamantes muy caros
+
+```{r}
+datos <- datos |>
+  mutate(price10 = log10(price))
+```
+
+\-
+
+¿Existen otras variables numéricas que presenten esta característica?
+
+```{r}
+vars <- c("carat", "depth", "table", "x", "y", "z")
+
+for (v in vars) {
+  print(
+    ggplot(diamonds, aes_string(x = v)) +
+      geom_histogram(fill = "tomato", color = "white") +
+      labs(title = paste("Distribución de", v))
+  )
+}
+
+```
+
+RTA. Si. Las variables numéricas presentan asimetría y dispersión
+
+2.  Divida la base de datos ...
+
+```{r}
+set.seed(123)
+datos_split <- initial_split(datos, 
+                                 prop = 0.8, 
+                                 strata = price10
+)
+datos_train <- training(datos_split)
+datos_test  <- testing(datos_split)
+```
+
+3.  genere un esquema de Validación Cruzada de 5 partes
+
+    ```{r}
+    library(rsample)
+
+    set.seed(123)  # para reproducibilidad
+    cv_folds <- vfold_cv(datos_train, v = 5)
+
+    cv_folds
+    ```
+
+    4.  Pre procesamiento: En mi opinión es más interesante dejar de lado las variables dummies, ya si se transforman a 0 y 1 no van a aportar rangos amplios al análisis.
+
+```{r}
+datos_reci <- recipe(price10 ~ carat + table + cut +  color + clarity, data = datos_train)   |> 
+  step_log(carat, base = 10) |>
+  step_log(table, base = 10) |> 
+  #step_log(depth, base = 10) |> 
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) 
+tidy(datos_reci)
+```
+
+5.  Por qué el paso de normalización resulta estrictamente indispensable al trabajar con modelos regularizados como Lasso, Ridge o Elastic Net?
+
+    RTA: Primero, que es normalización? es el proceso de llevar todas las variables numéricas a una misma escala. Segundo, cómo se hace? restando la media y la desviación estandard, o bien reescalando a un rango fijo como \[0,1\]. Terceros, para que se hace? En un ejemplo de dos variables como edad (entre 20 y 70) y otra como ingresos (entre 10.000 y 200.000), edad tiene un rango de 50 e ingresos tiene 190.000, las penalizaciones afectarían más a las variables con valores más grandes y sesgarían el modelo
+
+    ## Ejercicio 2. Continuando
+
+    1 Defina la especificación de un modelo elastic net . Configure los hiperparámetros correspondientes para ser calibrados
+
+    ```{r}
+    # Definición del modelo Elastic Net
+    elastic_net_spec <- linear_reg(
+      penalty = tune(),   # λ será calibrado
+      mixture = tune()    # α será calibrado
+    ) |>
+      set_engine("glmnet")
+
+    elastic_net_spec
+
+    ```
+
+    ```{r}
+    elastic_net_wf <- workflow() |>
+      add_model(elastic_net_spec) |>
+      add_recipe(datos_reci)
+
+    ```
+
+\-
+
+2.  Diseñe una grilla regular de búsqueda con 5 × 5 combinaciones de parámetros
+
+```{r}
+elastic_net_grid <- grid_regular(
+  penalty(),
+  mixture(),
+  levels = 5   # 5 valores para cada parámetro
+)
+
+elastic_net_grid
+```
+
+3.  Ejecute el proceso de calibración
+
+```{r}
+set.seed(123)
+elastic_net_tuned <- tune_grid(
+  elastic_net_wf,
+  resamples = cv_folds,          # folds de validación cruzada
+  grid = elastic_net_grid,
+  metrics = metric_set(rmse, rsq)
+)
+
+collect_metrics(elastic_net_tuned)
+
+
+```
+
+\-
+
+4.  Grafique la evolución de las métricas
+
+```{r}
+autoplot(elastic_net_tuned)
+```
+
+\-
+
+5.  Actualice el flujo de trabajo con los mejores hiperparámetros
+
+    ```{r}
+    best_params <- select_best(elastic_net_tuned, metric = "rmse")
+    best_params
+
+    ```
+
+6 . entrenar el modelo final sobre todo el conjunto de entrenamiento y evaluarlo en el conjunto de prueba
+
+```{r}
+elastic_net_final_wf <- finalize_workflow(
+  elastic_net_wf,
+  best_params
+)
+```
+
+7 Calcule las métricas finales en dólares
+
+```{r}
+elastic_net_final_fit <- fit(
+  elastic_net_final_wf,
+  data = datos_train
+)
+
+pred_test <- predict(elastic_net_final_fit, new_data = datos_test)
+
+# Transformar a escala original
+pred_test <- pred_test |>
+  mutate(price_pred = 10^.pred)
+
+```
+
+Construya un gráfico de dispersión de Valores Reales vs. Predichos
+
+```{r}
+library(ggplot2)
+
+# Combinar valores reales y predichos
+resultados_test <- datos_test |>
+  mutate(price_pred = pred_test$price_pred)
+
+# Gráfico de dispersión
+ggplot(resultados_test, aes(x = price, y = price_pred)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  geom_abline(intercept = 0, slope = 1, color = "firebrick", linetype = "dashed") +
+  scale_y_continuous(labels = comma) +   # eje Y en formato legible
+  scale_x_continuous(labels = comma) +   # eje X también en formato legible
+  labs(
+    title = "Valores Reales vs. Predichos",
+    subtitle = "Elastic Net sobre conjunto de prueba",
+    x = "Precio real (USD)",
+    y = "Precio predicho (USD)"
+  ) +
+  theme_minimal()
+
+```
+
+\-
+
+8\. ¿Se observa un impacto significativo de la regularización en este caso? Justifique su respuesta basándose en el comportamiento de los datos.
+
+RTA: estuve haciendo varias pruebas con distintas recipes y lo más significativo fue saltearse el logaritmo de "carat"
+
+```{r, echo=FALSE}
+library(png)
+library(grid)
+img <- readPNG("sin carat log10.png")
+grid.raster(img)
+```
+
+9.¿Qué variables resultaron las más importantes ?
+
+La más importante es la varible "carat" con log10
+
+Aquí un ejemplo sin utilizar dicha variable
+
+```{r, echo=FALSE}
+library(png)
+library(grid)
+img <- readPNG("sin carat.png")
+grid.raster(img)
+```
+
